@@ -11,11 +11,13 @@
 
 ## 2. 실험 결과 (Experimental Results)
 
-| 실험 ID  | 모델명              | Epochs | Batch Size | Learning Rate | F1 점수 (Dev) | F1 점수 (Test) | 비고                  |
-|----------|--------------------|--------|------------|---------------|---------------|----------------|-----------------------|
-| exp01    | layoutlm-base      | 3      | 8          | 5e-5          | 94.2          | 93.7           | 베이스라인 설정       |
-| exp02    | layoutlm-base      | 5      | 8          | 3e-5          | 94.5          | 93.8           | Epoch 증가 + LR 감소 |
-| exp03    | layoutlm-base      | 3      | 8          | 5e-5          | 94.1          | 93.5           | FP16 적용, 속도 향상 |
+| 실험 ID | 모델명                   | Epochs | Batch Size (per GPU) | Grad Accum Steps | Learning Rate | Warmup Steps | Weight Decay | Max Seq Length | Optimizer | Scheduler      | FP16  | F1 점수 (Dev) | F1 점수 (Test) | 비고                           |
+|---------|--------------------------|--------|----------------------|------------------|---------------|--------------|--------------|----------------|-----------|----------------|-------|---------------|----------------|--------------------------------|
+| exp01   | layoutlm-base-uncased     | 10     | 4                    | 1                | 5.0e-05       | 0            | 0.0          | 512            | AdamW     | Linear+Warmup  | False | 95.7911       | 86.0583        | Epoch 증가, batch 감소          |
+| exp02   | layoutlmv3-base-sroie     | 20     | 4                    | 1                | 5.0e-05       | 0            | 0.0          | 512            | AdamW     | Linear+Warmup  | False | 94.3941       | 79.4784        | LayoutLMv3, Epoch 20            |
+| exp03   | roberta-base              | 10     | 4                    | 1                | 5.0e-05       | 0            | 0.0          | 512            | AdamW     | Linear+Warmup  | False | 94.9281       | 76.3762        | RoBERTa, Epoch 10               |
+| exp04   | bert-large-uncased        | 20     | 4                    | 1                | 5.0e-05       | 0            | 0.0          | 512            | AdamW     | Linear+Warmup  | False | 94.3941       | 79.4784        | Bert Large, Epoch 20            |
+
 
 ---
 
@@ -70,7 +72,7 @@ python evaluation.py \
 - 일부 영수증은 폰트 크기·정렬이 다른 항목이 섞여 있어 레이아웃 정보 해석에 혼선을 줌.
 
 ### 4.2 모델 및 학습 전략
-- 모델 구조: 문서 레이아웃과 텍스트를 동시에 처리할 수 있는 LayoutLM 기반 토큰 분류 모델과 단순 텍스 기반 모델 학습 테스트
+- 모델 구조: 문서 레이아웃과 텍스트를 동시에 처리할 수 있는 LayoutLM 기반 토큰 분류 모델과 단순 텍스트 기반 모델 학습 테스트
 - 학습 최적화: AMP(FP16) 적용으로 GPU 메모리 사용량을 줄이고 학습 속도를 향상.
 - 스케줄러: Linear Learning Rate Scheduler와 Warmup 단계 적용, 초반 학습 안정성 확보.
 - Batch 처리: Gradient Accumulation을 사용하여 GPU 메모리 한계 내에서 더 큰 효과적 Batch Size로 학습.
@@ -89,11 +91,24 @@ python evaluation.py \
 - 클래스 불균형으로 인해 드물게 등장하는 엔티티 라벨 인식률이 낮음.
 
 ### 4.5 향후 개선 방향 (Future Work)
-- 데이터 증강: OCR 결과에 랜덤 노이즈 추가, Bounding Box 위치 변형, 배경/해상도 변화, Synthtiger 등 가상 데이터 합성 엔진 사용
-- 모델 업그레이드: LayoutLMv3, LayoutXLM 등 시각·언어 융합 구조가 강화된 최신 모델 적용.
-- 외부 데이터 활용: 영수증, 송장, 전표 등 유사 문서 데이터셋을 통한 추가 사전 학습.
-- 후처리 규칙 적용: 금액·날짜 등 패턴 기반 오류 교정(Post-processing).
-- 오류 분석 기반 튜닝: Confusion Matrix, 잘못 예측된 케이스의 공통 패턴 분석 후, 맞춤형 전처리 설계.
+#### 4.5.1 미세 파라미터 조정(Hyperparameter Fine-tuning)
+- Learning Rate 스케줄 세분화(예: cosine decay, warmup 비율 조정)
+- Batch Size·Gradient Accumulation·Warmup Steps 최적값 탐색
+- Weight Decay, Dropout 비율 변화에 따른 성능 민감도 분석
+
+#### 4.5.2 모델 구조 변형(Architecture Tweaks)
+
+- LayoutLMv3, RoBERTa, BERT Large 등의 헤드 구조 교체 및 Layer 수 변경 실험
+- Multi-task 학습(예: NER + OCR 후처리) 적용 가능성 검토
+
+#### 4.5.3 데이터 확장(Data Augmentation)
+- 문서 레이아웃 변형, 텍스트 증강, 노이즈 주입
+- 외부 유사 도메인 데이터셋 혼합 학습
+- 정밀 평가 지표 확대
+
+Precision / Recall 세부 Breakdown
+
+Entity-level Error Analysis를 통한 오류 유형별 개선 전략 수립
 
 제출자 정보
 이름: [권효은]
