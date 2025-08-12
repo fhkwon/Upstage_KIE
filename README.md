@@ -43,7 +43,6 @@ python train.py \
     --per_gpu_train_batch_size 4 \
     --num_train_epochs 10 \
     --output_dir "results/train_v1.0" \
-    --data_dir "../data" \
     --overwrite_output_dir
 ```
 
@@ -61,45 +60,37 @@ python inference.py \
 
 ### 평가 실행
 ```
-python train.py \
-  --model_name_or_path microsoft/layoutlm-base-uncased \
-  --output_dir ./output \
-  --do_train --do_eval \
-  --evaluate_during_training \
-  --num_train_epochs 3 \
-  --per_gpu_train_batch_size 8 \
-  --learning_rate 5e-5 \
-  --fp16
+python evaluation.py \
+    --output_dir results/infer_bert_op_l_v1.0
 ```
 
 ## 4. 접근 방법 (Approach)
 ### 4.1 데이터 탐색 (EDA)
-- OCR로 추출된 Bounding Box 좌표 분포를 확인하여 문서 내 텍스트 배치 특성을 파악함.
 - 개체명 라벨 분포를 분석한 결과, O 태그(비개체)가 전체 토큰의 대다수를 차지하여 심한 클래스 불균형이 존재함.
-- 금액, 날짜, 전화번호 등 숫자 기반 필드에서 OCR 오인식과 잘못된 좌표 매핑이 빈번하게 발생함.
 - 일부 영수증은 폰트 크기·정렬이 다른 항목이 섞여 있어 레이아웃 정보 해석에 혼선을 줌.
 
 ### 4.2 모델 및 학습 전략
-- 모델 구조: 문서 레이아웃과 텍스트를 동시에 처리할 수 있는 LayoutLM 기반 토큰 분류 모델.
+- 모델 구조: 문서 레이아웃과 텍스트를 동시에 처리할 수 있는 LayoutLM 기반 토큰 분류 모델과 단순 텍스 기반 모델 학습 테스트
 - 학습 최적화: AMP(FP16) 적용으로 GPU 메모리 사용량을 줄이고 학습 속도를 향상.
 - 스케줄러: Linear Learning Rate Scheduler와 Warmup 단계 적용, 초반 학습 안정성 확보.
 - Batch 처리: Gradient Accumulation을 사용하여 GPU 메모리 한계 내에서 더 큰 효과적 Batch Size로 학습.
 - 다중 GPU 학습 지원: torch.nn.DataParallel 및 분산 학습(DistributedDataParallel) 구조 호환.
 
 ### 4.3 설계 근거
-- LayoutLM은 OCR 텍스트 토큰과 위치(Bounding Box) 정보를 함께 입력받아 문서 구조적 문맥을 이해할 수 있음.
+- LayoutLM은 OCR 텍스트 토큰과 위치(Bounding Box) 정보를 함께 입력받아 영수증의 구조적 문맥을 이해할 수 있음.
 - FP16은 동일 하드웨어 자원으로 더 많은 Epoch 또는 하이퍼파라미터 조합 실험 가능.
 - Warmup 스케줄링은 학습 초기의 급격한 손실 변화를 완화해 안정적인 수렴을 유도.
 
 ### 4.4 모델 한계
+- 데이터 구조: 이미지 feature를 제외한 학습 baseline 코드 
 - OCR 품질이 낮거나 좌표가 잘못 추출된 경우, 모델이 잘못된 공간 정보를 학습하여 성능이 저하됨.
 - Bounding Box 좌표 표준화 미흡으로, 다른 해상도의 영수증 이미지에서 레이아웃 이해도가 떨어짐.
 - Epoch 수를 늘리면 특정 엔티티(예: 상호명, 주소)에 과적합이 발생하는 경향이 있음.
 - 클래스 불균형으로 인해 드물게 등장하는 엔티티 라벨 인식률이 낮음.
 
 ### 4.5 향후 개선 방향 (Future Work)
-- 데이터 증강: OCR 결과에 랜덤 노이즈 추가, Bounding Box 위치 변형, 배경/해상도 변화 등 실험.
-- 모델 업그레이드: LayoutLMv2, LayoutXLM 등 시각·언어 융합 구조가 강화된 최신 모델 적용.
+- 데이터 증강: OCR 결과에 랜덤 노이즈 추가, Bounding Box 위치 변형, 배경/해상도 변화, Synthtiger 등 가상 데이터 합성 엔진 사용
+- 모델 업그레이드: LayoutLMv3, LayoutXLM 등 시각·언어 융합 구조가 강화된 최신 모델 적용.
 - 외부 데이터 활용: 영수증, 송장, 전표 등 유사 문서 데이터셋을 통한 추가 사전 학습.
 - 후처리 규칙 적용: 금액·날짜 등 패턴 기반 오류 교정(Post-processing).
 - 오류 분석 기반 튜닝: Confusion Matrix, 잘못 예측된 케이스의 공통 패턴 분석 후, 맞춤형 전처리 설계.
