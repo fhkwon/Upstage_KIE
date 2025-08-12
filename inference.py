@@ -1,231 +1,147 @@
+# -*- coding: utf-8 -*-
 import argparse
+import csv
 import logging
 import os
-import csv
 import shutil
+from typing import List
 
 import torch
 from torch.nn import CrossEntropyLoss
-from transformers import (BERT_PRETRAINED_CONFIG_ARCHIVE_MAP,
-                          LAYOUTLM_PRETRAINED_CONFIG_ARCHIVE_MAP,
-                          ROBERTA_PRETRAINED_CONFIG_ARCHIVE_MAP, BertConfig,
-                          BertForTokenClassification, BertTokenizer,
-                          LayoutLMConfig, LayoutLMForTokenClassification,
-                          RobertaConfig, RobertaForTokenClassification,
-                          RobertaTokenizer)
+from transformers import AutoModelForTokenClassification, AutoTokenizer
+
 from utils import evaluate
 
-logger = logging.getLogger(__name__)
-
-ALL_MODELS = sum(
-    (
-        tuple(conf_archive_map.keys())
-        for conf_archive_map in (
-            BERT_PRETRAINED_CONFIG_ARCHIVE_MAP,
-            ROBERTA_PRETRAINED_CONFIG_ARCHIVE_MAP,
-            LAYOUTLM_PRETRAINED_CONFIG_ARCHIVE_MAP,
-        )
-    ),
-    (),
-)
-
-MODEL_CLASSES = {
-    "bert": (BertConfig, BertForTokenClassification, BertTokenizer),
-    "roberta": (RobertaConfig, RobertaForTokenClassification, RobertaTokenizer),
-    "layoutlm": (LayoutLMConfig, LayoutLMForTokenClassification, BertTokenizer),
-}
-
-# NOTE: DO NOT MODIFY THE FOLLOWING PATHS
-# ---------------------------------------
+# NOTE: DO NOT MODIFY
 data_dir = os.environ.get("SM_CHANNEL_EVAL", "../input/data")
 model_dir = os.environ.get("SM_CHANNEL_MODEL", "./model")
 output_dir = os.environ.get("SM_OUTPUT_DATA_DIR", "./output")
-# ---------------------------------------
+# -------------------
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
 
-def get_labels(path):
-    with open(path, "r") as f:
+def get_labels(path: str) -> List[str]:
+    with open(path, "r", encoding="utf-8") as f:
         labels = f.read().splitlines()
-    if "O" not in labels:
-        labels = ["O"] + labels
-    return labels
+    return labels if "O" in labels else ["O"] + labels
 
 
-def main():  # noqa C901
+def _to_s_label(tag: str) -> str:
+    t = (tag or "O").strip().upper()
+    ent = t.split("-", 1)[-1] if "-" in t else t
+    return f"S-{ent}" if ent in {"COMPANY", "DATE", "ADDRESS", "TOTAL"} else "O"
+
+
+def main() -> None:
     parser = argparse.ArgumentParser()
 
-    ## Required parameters
-    parser.add_argument(
-        "--model_type",
-        default=None,
-        type=str,
-        required=True,
-        help="Model type selected in the list: " + ", ".join(MODEL_CLASSES.keys()),
-    )
-    parser.add_argument(
-        "--model_name_or_path",
-        default=None,
-        type=str,
-        required=True,
-        help="Path to pre-trained model or shortcut name selected in the list: "
-        + ", ".join(ALL_MODELS),
-    )
+    # 동일 CLI 유지
+    parser.add_argument("--model_type", required=True, choices=["bert", "roberta", "layoutlm"])
+    parser.add_argument("--model_name_or_path", required=True, type=str)
 
-    ## Other parameters
-    parser.add_argument(
-        "--data_dir",
-        default=data_dir,
-        type=str,
-        help="The input data dir. Should contain the training files for the CoNLL-2003 NER task.",
-    )
-    parser.add_argument(
-        "--mode",
-        default="test",
-        type=str,
-        choices=["test", "op_test"],
-        help="The type of inference. The `test` mode indicates the f1 score of the bbox unit of the referenced BIO tag, "
-             "and the `op_test` mode indicates the entity f1 score of the final result."
-    )
-    parser.add_argument(
-        "--model_dir",
-        default=model_dir,
-        type=str,
-        help="The output directory where the model checkpoints will be written.",
-    )
-    parser.add_argument(
-        "--output_dir",
-        default=output_dir,
-        type=str,
-        help="The output directory where the model predictions will be written.",
-    )
-    parser.add_argument(
-        "--labels",
-        default=os.path.join(data_dir, "labels.txt"),
-        type=str,
-        help="Path to a file containing all labels. If not specified, CoNLL-2003 labels are used.",
-    )
-    parser.add_argument(
-        "--cache_dir",
-        default="",
-        type=str,
-        help="Where do you want to store the pre-trained models downloaded from s3",
-    )
-    parser.add_argument(
-        "--max_seq_length",
-        default=512,
-        type=int,
-        help="The maximum total input sequence length after tokenization. Sequences longer "
-        "than this will be truncated, sequences shorter will be padded.",
-    )
-    parser.add_argument(
-        "--do_predict",
-        action="store_true",
-        help="Whether to run predictions on the test set.",
-    )
-    parser.add_argument(
-        "--do_lower_case",
-        action="store_true",
-        help="Set this flag if you are using an uncased model.",
-    )
-    parser.add_argument(
-        "--no_cuda", action="store_true", help="Avoid using CUDA when available"
-    )
-    parser.add_argument(
-        "--overwrite_output_dir",
-        action="store_true",
-        help="Overwrite the content of the output directory",
-    )
-    parser.add_argument(
-        "--overwrite_cache",
-        action="store_true",
-        help="Overwrite the cached training and evaluation sets",
-    )
-    parser.add_argument(
-        "--per_gpu_eval_batch_size",
-        default=8,
-        type=int,
-        help="Batch size per GPU/CPU for evaluation.",
-    )
-    parser.add_argument(
-        "--local_rank",
-        type=int,
-        default=-1,
-        help="For distributed training: local_rank",
-    )
+    parser.add_argument("--data_dir", default=data_dir, type=str)
+    parser.add_argument("--mode", default="test", choices=["test", "op_test"], type=str)
+    parser.add_argument("--model_dir", default=model_dir, type=str)
+    parser.add_argument("--output_dir", default=output_dir, type=str)
+    parser.add_argument("--labels", default=os.path.join(data_dir, "labels.txt"), type=str)
+    parser.add_argument("--cache_dir", default="", type=str)
+    parser.add_argument("--max_seq_length", default=512, type=int)
+
+    parser.add_argument("--do_predict", action="store_true")
+    parser.add_argument("--do_lower_case", action="store_true")
+    parser.add_argument("--no_cuda", action="store_true")
+    parser.add_argument("--overwrite_output_dir", action="store_true")
+    parser.add_argument("--overwrite_cache", action="store_true")
+    parser.add_argument("--per_gpu_eval_batch_size", default=8, type=int)
+    parser.add_argument("--local_rank", default=-1, type=int)
+
     args = parser.parse_args()
 
-    if (
-        os.path.exists(args.output_dir)
-        and os.listdir(args.output_dir)
-        and args.do_predict
-    ):
+    if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_predict:
         if not args.overwrite_output_dir:
-            raise ValueError(
-                "Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(
-                    args.output_dir
-                )
-            )
-        else:
-            if args.local_rank in [-1, 0]:
-                shutil.rmtree(args.output_dir)
+            raise ValueError(f"Output directory ({args.output_dir}) already exists and is not empty. "
+                             f"Use --overwrite_output_dir.")
+        if args.local_rank in [-1, 0]:
+            shutil.rmtree(args.output_dir)
 
-    if (
-        not os.path.exists(args.output_dir)
-        and args.do_predict
-        and args.local_rank in [-1, 0]
-    ):
-        os.makedirs(args.output_dir)
+    if not os.path.exists(args.output_dir) and args.do_predict and args.local_rank in [-1, 0]:
+        os.makedirs(args.output_dir, exist_ok=True)
 
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu"
-    )
-    args.n_gpu = 0 if args.no_cuda else torch.cuda.device_count()
+    device = torch.device("cuda" if (torch.cuda.is_available() and not args.no_cuda) else "cpu")
+    args.n_gpu = torch.cuda.device_count() if device.type == "cuda" else 0
     args.device = device
 
-    # Set seed
     labels = get_labels(args.labels)
-
-    # Use cross entropy ignore index as padding label id so that only real label ids contribute to the loss later
     pad_token_label_id = CrossEntropyLoss().ignore_index
 
-    args.model_type = args.model_type.lower()
-    config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
-
-    # Predict!
-    tokenizer = tokenizer_class.from_pretrained(
-        args.model_name_or_path, do_lower_case=args.do_lower_case
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path, cache_dir=(args.cache_dir or None), do_lower_case=args.do_lower_case
     )
-    model = model_class.from_pretrained(args.model_dir)
+    model = AutoModelForTokenClassification.from_pretrained(args.model_dir)
     model.to(args.device)
-    result, predictions = evaluate(
-        args, model, tokenizer, labels, pad_token_label_id, mode=args.mode
-    )
-    # Save results
-    output_test_results_file = os.path.join(args.output_dir, f"{args.mode}_results.txt")
-    with open(output_test_results_file, "w") as writer:
-        for key in sorted(result.keys()):
-            writer.write("{} = {}\n".format(key, str(result[key])))
-    # Save predictions
-    output_test_predictions_file = os.path.join(args.output_dir, f"output.csv")
-    with open(output_test_predictions_file, "w", encoding="utf8") as writer:
-        csv_writer = csv.writer(writer, lineterminator='\n')
-        with open(os.path.join(args.data_dir, f"{args.mode}.txt"), "r", encoding="utf8") as f:
-            example_id = 0
-            for line in f:
-                if line.startswith("-DOCSTART-") or line == "" or line == "\n":
-                    writer.write(line)
-                    if not predictions[example_id]:
-                        example_id += 1
-                elif predictions[example_id]:
-                    output_line = [line.split()[0], predictions[example_id].pop(0)]
-                    if args.mode == "op_test":
-                        output_line += [line.split()[-1]]
-                    csv_writer.writerow(output_line)
-                else:
-                    logger.warning(
-                        "Maximum sequence length exceeded: No prediction for '%s'.",
-                        line.split()[0],
-                    )
+
+    if not args.do_predict:
+        logger.info("do_predict가 설정되지 않아 종료합니다.")
+        return
+
+    result, predictions = evaluate(args, model, tokenizer, labels, pad_token_label_id, mode=args.mode)
+
+    # {mode}_results.txt
+    res_path = os.path.join(args.output_dir, f"{args.mode}_results.txt")
+    with open(res_path, "w", encoding="utf-8") as w:
+        for k in sorted(result.keys()):
+            w.write(f"{k} = {result[k]}\n")
+
+    # output.csv: 입력 파일 순회하며 예측 매핑
+    data_path = os.path.join(args.data_dir, f"{args.mode}.txt")
+    out_csv = os.path.join(args.output_dir, "output.csv")
+
+    total_lines = written = skipped_no_pred = skipped_ctrl = 0
+    sent_idx = tok_idx = 0
+
+    with open(out_csv, "w", encoding="utf-8", newline="") as f_out, \
+            open(data_path, "r", encoding="utf-8") as f_in:
+        writer = csv.writer(f_out, lineterminator="\n")
+
+        for raw in f_in:
+            total_lines += 1
+            line = raw.rstrip("\n")
+            is_ctrl = raw.startswith("-DOCSTART-") or line.strip() == ""
+            if is_ctrl:
+                skipped_ctrl += 1
+                # 문장 경계 이동
+                if sent_idx < len(predictions) and tok_idx == len(predictions[sent_idx]):
+                    sent_idx += 1
+                tok_idx = 0
+                continue
+
+            parts = line.split("\t") if "\t" in line else line.split()
+            token = parts[0]
+
+            if sent_idx < len(predictions) and tok_idx < len(predictions[sent_idx]):
+                pred_tag = predictions[sent_idx][tok_idx]
+            else:
+                pred_tag = "O"
+                skipped_no_pred += 1
+            tok_idx += 1
+
+            if args.mode == "op_test":
+                filename = parts[2] if len(parts) >= 3 else ""
+                writer.writerow([token, _to_s_label(pred_tag), filename])
+            else:
+                writer.writerow([token, pred_tag])
+            written += 1
+
+    logger.info("Saved results: %s", os.path.abspath(res_path))
+    logger.info("Saved predictions: %s", os.path.abspath(out_csv))
+    logger.info("Lines total=%d, written=%d, skipped(no_pred)=%d, skipped(ctrl)=%d",
+                total_lines, written, skipped_no_pred, skipped_ctrl)
 
 
 if __name__ == "__main__":
